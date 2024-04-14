@@ -1,0 +1,128 @@
+#Importar librerias
+import numpy as np
+import pandas as pd
+import plotly
+import matplotlib.pyplot as plt
+from prophet import Prophet
+from prophet.diagnostics import cross_validation
+from prophet.diagnostics import performance_metrics
+from prophet.plot import plot_cross_validation_metric
+from itertools import product
+
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.rcParams['figure.figsize'] = (10, 7.5)
+plt.rcParams['axes.grid'] = False
+
+filname = 'Con_Laborable_LAG2.csv'
+
+#Leer CSV e imprimo las primeras 5 lineas
+df = pd.read_csv(filname)
+print(df.head())
+
+#Cambiamos nombres a las columnas
+df.columns = ['ds', 'y','LABORABLE_LAG2']
+df.head()
+
+# Separar datos de entrenamiento y prueba
+train = df[0:1366]
+test = df[1366:1457]
+
+#Ajuste de hiperparametros y validacion cruzada
+param_grid = {
+    'changepoint_prior_scale': [0.01, 0.1, 0.5, 0.9],
+    'seasonality_prior_scale': [1.0, 10.0, 15.0, 20.0],
+    'holidays_prior_scale': [1.0, 10.0, 15.0],
+    'n_changepoints': [10],
+    'weekly_seasonality': [True],
+}
+# param_grid = {
+#     'changepoint_prior_scale': [0.019],
+#     'seasonality_prior_scale': [1],
+#     'holidays_prior_scale': [9],
+#     'n_changepoints':[9],
+#     'weekly_seasonality': [True],
+# }
+
+# Generar todas las combinaciones posibles de hiperparámetros
+params = [dict(zip(param_grid.keys(), v)) for v in product(*param_grid.values())]
+# Almacenará los MAEs de cada conjunto de parámetros
+maes = []
+# Iterar sobre todas las combinaciones de hiperparámetros
+for param in params:
+    m = Prophet(**param)
+    m.add_regressor('LABORABLE_LAG2')
+    m.add_country_holidays(country_name='AR')
+    m.fit(train)
+    # Realizar validación cruzada y calcular el MAE
+    df_cv = cross_validation(m, initial='730 days', period='180 days', horizon='91 days', parallel='processes')
+    df_p = performance_metrics(df_cv, rolling_window=1)
+    maes.append(df_p['mae'].values[0])
+
+# Encontrar los mejores parámetros
+tuning_results = pd.DataFrame(params)
+tuning_results['mae'] = maes
+
+best_params = params[np.argmin(maes)]
+print(best_params)
+
+m = Prophet(**best_params)
+m.add_regressor('LABORABLE_LAG2')
+m.add_country_holidays(country_name='AR')
+m.fit(train)
+
+#Prediccion
+future = m.make_future_dataframe(periods=len(test), freq='D')
+future['LABORABLE_LAG2'] = df['LABORABLE_LAG2'].values[:len(future)]
+forecast = m.predict(future)
+print(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(91))
+
+# Asignar las predicciones al conjunto de prueba
+test[['yhat', 'yhat_lower', 'yhat_upper']] = forecast[['yhat', 'yhat_lower', 'yhat_upper']]
+print(test.head())
+
+#last season naive forecast
+test['baseline'] = train['y'][-91:].values
+print(test.head())
+
+# Definir funcion de errores
+def mape(test_data, prediction):
+    error = np.abs((test_data - prediction) / test_data)
+    mape_value = np.mean(error) * 100
+    normalized_mape = mape_value / 100
+    return normalized_mape
+
+def smape(test_data, prediction):
+    absolute_error = np.abs(test_data - prediction)
+    sum_absolute = np.abs(test_data) + np.abs(prediction)
+    smape_value = np.mean(absolute_error / sum_absolute) * 100
+
+    # Normalize SMAPE to the range [0, 1]
+    normalized_smape = smape_value / 200  # Since the maximum SMAPE is 200%
+
+    return normalized_smape
+
+def mae_n(test_data, prediction):
+    absolute_error = np.abs(test_data - prediction)
+    mean_absolute_error = np.mean(absolute_error)
+
+    # Normalize MAE
+    max_value = np.max(test_data)
+    normalized_mae = mean_absolute_error / max_value
+
+    return normalized_mae
+
+def mae(test_data, prediction):
+    return np.mean(np.abs(test_data - prediction))
+
+# Calcular errores de predicción para el conjunto de prueba
+mape_error = mape(test['y'], test['yhat'])
+smape_error = smape(test['y'], test['yhat'])
+mae_error = mae(test['y'], test['yhat'])
+mae_n_error = mae_n(test['y'], test['yhat'])
+
+print('MAE: ', mae_error)
+print('MAPE: ', mape_error)
+print('MAE_n: ', mae_n_error)
+print('SMAPE: ', smape_error)
